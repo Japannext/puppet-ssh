@@ -1,0 +1,156 @@
+#!/usr/bin/env ruby
+
+require 'json'
+require 'net/ssh'
+require 'optparse'
+require 'ostruct'
+require 'colored'
+require 'pathname'
+require 'date'
+
+options = OpenStruct.new
+
+# Defaults
+PUPPET = '/opt/puppetlabs/bin/puppet'
+
+options.batch = 10
+options.user = ENV['USER']
+additional_options = []
+
+hosts = []
+filename = 'default'
+
+# Options
+OptionParser.new do |opts|
+  opts.banner = "Usage: #{$PROGRAM_NAME} [options] HOST..."
+  opts.on('-h file', '--hosts file', String, 'A file containing a list of hosts') do |file|
+    filename = Pathname(file).basename
+    hosts += File.read(file).each_line.map(&:chomp)
+  end
+  opts.on('-l user', '--login user', String, 'User to login with') do |user|
+    options.user = user
+  end
+  opts.on('-e env', '--environment env', String, 'Puppet environment') do |env|
+    additional_options << "--environment #{env}"
+  end
+  opts.on('-t tags', '--tags tags', String, 'A comma delimited list of tags') do |tags|
+    additional_options << "--tags #{tags}"
+  end
+  opts.on('-b batch', '--batch batch', Integer, 'Batch size') do |batch|
+    options.batch = batch
+  end
+  opts.on('-s source', '--source source', String, 'A regex to select only certain resources') do |s|
+    options.source = s
+  end
+  opts.on_tail('-h', '--help') do
+    puts opts
+    exit 1
+  end
+end.parse!
+
+hosts += ARGV
+
+now = DateTime.now.strftime('%Y-%m-%dT%H%M')
+OUTFILE = Pathname.new("#{ENV['PWD']}/puppet_out") + "#{filename}-#{now}.log"
+OUTFILE.dirname.mkpath
+
+# Functions
+
+def tarpit(message)
+  if message =~ /^\-\-\-/ or message =~ /^\+\+\+/
+    regex = /\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}\.\d{9}/
+    message.gsub!(regex, 'YYYY-MM-DD HH:mm:ss')
+  end
+  if message =~ /^\+\+\+/
+    message.gsub!(%r{/tmp/puppet-file\S+}, '/tmp/puppet-fileXXXX')
+  end
+
+  if message =~ /src [0-9]+.[0-9]+.[0-9]+.[0-9]+ /
+    message.gsub!(%r{src [0-9]+.[0-9]+.[0-9]+.[0-9]+ }, 'src xx.xx.xx.xx ')
+  end
+
+  return message
+end
+
+def format(message, hash)
+  source = hash['source']
+  level = hash['level']
+  output = "#{source}: #{message}"
+  output = case level
+  when 'warning' then output.yellow
+  when 'crit', 'err', 'alert', 'emerg' then output.red
+  when 'info' then output.green
+  else output
+  end
+
+  return "[#{level}] #{output}"
+end
+
+# Main loop
+aggregates = {}
+
+ssh_options = {verify_host_key: :never, non_interactive: true, check_host_ip: false}
+
+batches = hosts.each_slice(options.batch).to_a
+batches.each.with_index(1) do |batch, index|
+  puts "[Batch #{index}/#{batches.size}] #{batch[0]} to #{batch[-1]}"
+  threads = []
+  batch.each do |host|
+    threads << Thread.new do
+      Net::SSH.start(host, options.user, ssh_options) do |ssh|
+        tmpdir = ssh.exec!('/usr/bin/mktemp -d').chomp
+        logoutput = "#{tmpdir}/output.json"
+        ssh.exec!("sudo #{PUPPET} agent --test --noop --logdest #{logoutput} #{additional_options.join(' ')}")
+        ssh.loop
+        output = ssh.exec!("cat #{logoutput}")
+        json = JSON.parse(output + ']')
+        Thread.current[:host] = host
+        Thread.current[:json] = json
+      end
+    end
+  end
+  threads.each do |t|
+    t.join
+    t[:json].each do |entry|
+      message = tarpit(entry['message'])
+
+      # Option to only include some resources matcching a regex
+      next if options.source && entry['source'] !~ /#{options.source}/
+
+      # Non-enssential and a lot of unique messages that make the output less readable
+      next if entry['source'] == 'Puppet' and ['info', 'notice'].include?(entry['level'])
+
+      # Removing pluginsync messages
+      next if entry['source'] =~ %r{^/File}
+
+      aggregates[message] ||= {}
+      aggr = aggregates[message]
+      aggr['hosts'] ||= []
+      aggr['hosts'] << t[:host]
+      aggr['hosts'] = aggr['hosts'].uniq
+      aggr.merge!({
+          'level'  => entry['level'],
+          'tags'   => entry['tags'],
+          'source' => entry['source'],
+      })
+    end
+  end
+end
+
+OUTFILE.write('')
+$output = OUTFILE.open('a')
+
+def output(line)
+  puts line
+  $output.write("#{line}\n")
+end
+
+cases = aggregates.group_by { |_, v| v['hosts'] }
+cases = cases.sort_by { |h, _| h.length }.reverse
+cases.each_with_index do |(h, entries), index|
+  output "[Case #{index + 1}/#{cases.size}] #{h.join(' ')}"
+  entries.each do |(message, hash)|
+    output format(message, hash)
+  end
+  output ''
+end
