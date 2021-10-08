@@ -91,52 +91,84 @@ aggregates = {}
 
 ssh_options = {verify_host_key: :never, non_interactive: true, check_host_ip: false}
 
-batches = hosts.each_slice(options.batch).to_a
-batches.each.with_index(1) do |batch, index|
-  puts "[Batch #{index}/#{batches.size}] #{batch[0]} to #{batch[-1]}"
-  threads = []
-  batch.each do |host|
-    threads << Thread.new do
-      Net::SSH.start(host, options.user, ssh_options) do |ssh|
-        tmpdir = ssh.exec!('/usr/bin/mktemp -d').chomp
-        logoutput = "#{tmpdir}/output.json"
-        ssh.exec!("sudo #{PUPPET} agent --test --noop --logdest #{logoutput} #{additional_options.join(' ')}")
-        ssh.loop
-        output = ssh.exec!("cat #{logoutput}")
-        json = JSON.parse(output + ']')
-        Thread.current[:host] = host
-        Thread.current[:json] = json
+mutex = Mutex.new
+
+threads = []
+
+[ options.batch, hosts.size ].min.times { |thread_counter|
+
+  threads << Thread.new do
+    mutex.synchronize {
+      Thread.current[:index] = thread_counter + 1
+      Thread.current[:done] = 0
+    }
+
+    catch :done do
+
+      loop {
+
+        mutex.synchronize {
+          throw :done if hosts.size == 0
+          Thread.current[:host] = hosts.shift
+          Thread.current[:done] += 1
+          puts "Worker #{Thread.current[:index]}: Processing #{host}..."
+        }
+
+        Net::SSH.start(Thread.current[:host], options.user, ssh_options) do |ssh|
+          tmpdir = ssh.exec!('/usr/bin/mktemp -d').chomp
+          logoutput = "#{tmpdir}/output.json"
+          ssh.exec!("sudo #{PUPPET} agent --test --noop --logdest #{logoutput} #{additional_options.join(' ')}")
+          ssh.loop
+          output = ssh.exec!("cat #{logoutput}")
+          Thread.current[:json] = JSON.parse(output + ']')
+        end
+
+        mutex.synchronize {
+          Thread.current[:json].each do |entry|
+            message = tarpit(entry['message'])
+
+            # Option to only include some resources matcching a regex
+            next if options.source && entry['source'] !~ /#{options.source}/
+
+            # Non-enssential and a lot of unique messages that make the output less readable
+            next if entry['source'] == 'Puppet' and ['info', 'notice'].include?(entry['level'])
+
+            # Removing pluginsync messages
+            next if entry['source'] =~ %r{^/File}
+
+            aggregates[message] ||= {}
+            aggr = aggregates[message]
+            aggr['hosts'] ||= []
+            aggr['hosts'] << Thread.current[:host]
+            aggr['hosts'] = aggr['hosts'].uniq
+            aggr.merge!({
+              'level'  => entry['level'],
+              'tags'   => entry['tags'],
+              'source' => entry['source'],
+            })
+          end
+        }
+      }
+    end
+
+    Thread.main.wakeup
+
+  end
+
+}
+
+while threads.size > 0 do
+  sleep(60)
+  mutex.synchronize {
+    threads.each_with_index { |t, index|
+      unless t.alive? then
+        puts "Worker #{t[:index]}: Done after processing #{t[:done]} hosts."
+        t.join
+        threads.delete_at(index)
       end
-    end
-  end
-  threads.each do |t|
-    t.join
-    t[:json].each do |entry|
-      message = tarpit(entry['message'])
-
-      # Option to only include some resources matcching a regex
-      next if options.source && entry['source'] !~ /#{options.source}/
-
-      # Non-enssential and a lot of unique messages that make the output less readable
-      next if entry['source'] == 'Puppet' and ['info', 'notice'].include?(entry['level'])
-
-      # Removing pluginsync messages
-      next if entry['source'] =~ %r{^/File}
-
-      aggregates[message] ||= {}
-      aggr = aggregates[message]
-      aggr['hosts'] ||= []
-      aggr['hosts'] << t[:host]
-      aggr['hosts'] = aggr['hosts'].uniq
-      aggr.merge!({
-          'level'  => entry['level'],
-          'tags'   => entry['tags'],
-          'source' => entry['source'],
-      })
-    end
-  end
+    }
+  }
 end
-
 OUTFILE.write('')
 $output = OUTFILE.open('a')
 
