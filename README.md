@@ -32,7 +32,14 @@ Usage:
 
 Example output:
 ```console
-[Batch 1/1] puppet01 to puppet04
+[P:3 W:1 D:0] Worker 1: Processing puppet01....
+[P:2 W:2 D:0] Worker 3: Processing puppet02....
+[P:1 W:3 D:0] Worker 2: Processing puppet03....
+[P:0 W:4 D:0] Worker 4: Processing puppet04....
+[P:0 W:3 D:1] Worker 4: Done after processing 1 hosts.
+[P:0 W:2 D:2] Worker 1: Done after processing 1 hosts.
+[P:0 W:1 D:3] Worker 2: Done after processing 1 hosts.
+[P:0 W:0 D:4] Worker 3: Done after processing 1 hosts.
 [Case 1/6] puppet01 puppet02 puppet03 puppet04
 [notice] Class[Telegraf::Service]: Unscheduling all events on Class[Telegraf::Service]
 [notice] /Stage[main]/Jnx_puppet::Server/File[/etc/sysconfig/puppetserver]/content:

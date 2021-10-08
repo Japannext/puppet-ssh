@@ -95,6 +95,16 @@ mutex = Mutex.new
 
 threads = []
 
+@progress = {
+  pending: hosts.size,
+  wip: 0,
+  done: 0,
+}
+
+def progress_string
+  "[P:%d W:%d D:%d]" % [ @progress[:pending], @progress[:wip], @progress[:done] ]
+end
+
 [ options.batch, hosts.size ].min.times { |thread_counter|
 
   threads << Thread.new do
@@ -111,7 +121,9 @@ threads = []
           throw :done if hosts.size == 0
           Thread.current[:host] = hosts.shift
           Thread.current[:done] += 1
-          puts "Worker #{Thread.current[:index]}: Processing #{host}..."
+          @progress[:pending] -= 1
+          @progress[:wip] += 1
+          puts "#{progress_string} Worker #{Thread.current[:index]}: Processing #{Thread.current[:host]}..."
         }
 
         Net::SSH.start(Thread.current[:host], options.user, ssh_options) do |ssh|
@@ -147,6 +159,10 @@ threads = []
               'source' => entry['source'],
             })
           end
+
+          @progress[:wip] -= 1
+          @progress[:done] += 1
+
         }
       }
     end
@@ -162,7 +178,7 @@ while threads.size > 0 do
   mutex.synchronize {
     threads.each_with_index { |t, index|
       unless t.alive? then
-        puts "Worker #{t[:index]}: Done after processing #{t[:done]} hosts."
+        puts "#{progress_string} Worker #{t[:index]}: Done after processing #{t[:done]} hosts."
         t.join
         threads.delete_at(index)
       end
