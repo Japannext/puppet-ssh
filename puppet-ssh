@@ -14,6 +14,7 @@ options = OpenStruct.new
 PUPPET = '/opt/puppetlabs/bin/puppet'
 
 options.batch = 10
+options.bar = false
 options.user = ENV['USER']
 additional_options = []
 
@@ -41,6 +42,9 @@ OptionParser.new do |opts|
   end
   opts.on('-s source', '--source source', String, 'A regex to select only certain resources') do |s|
     options.source = s
+  end
+  opts.on('--[no-]bar', TrueClass, 'Show progress with a bar graph instead of exact numbers') do |s|
+    options.bar = s
   end
   opts.on_tail('-h', '--help') do
     puts opts
@@ -101,8 +105,21 @@ threads = []
   done: 0,
 }
 
-def progress_string
-  "[P:%d W:%d D:%d]" % [ @progress[:pending], @progress[:wip], @progress[:done] ]
+@symbols = {
+  pending: ?-,
+  wip: ?+,
+  done: ?#,
+}
+
+
+def progress_string(bar)
+  if bar then
+    [ :done, :wip, :pending ].reduce("") { |string, state|
+      string << @symbols[state] * @progress[state]
+    }
+  else
+    "[P:%d W:%d D:%d]" % [ @progress[:pending], @progress[:wip], @progress[:done] ]
+  end
 end
 
 [ options.batch, hosts.size ].min.times { |thread_counter|
@@ -123,7 +140,7 @@ end
           Thread.current[:done] += 1
           @progress[:pending] -= 1
           @progress[:wip] += 1
-          puts "#{progress_string} Worker #{Thread.current[:index]}: Processing #{Thread.current[:host]}..."
+          puts "#{progress_string(options.bar)} Worker #{Thread.current[:index]}: Processing #{Thread.current[:host]}..."
         }
 
         Net::SSH.start(Thread.current[:host], options.user, ssh_options) do |ssh|
@@ -178,7 +195,7 @@ while threads.size > 0 do
   mutex.synchronize {
     threads.each_with_index { |t, index|
       unless t.alive? then
-        puts "#{progress_string} Worker #{t[:index]}: Done after processing #{t[:done]} hosts."
+        puts "#{progress_string(options.bar)} Worker #{t[:index]}: Done after processing #{t[:done]} hosts."
         t.join
         threads.delete_at(index)
       end
