@@ -143,13 +143,18 @@ end
           puts "#{progress_string(options.bar)} Worker #{Thread.current[:index]}: Processing #{Thread.current[:host]}..."
         }
 
-        Net::SSH.start(Thread.current[:host], options.user, ssh_options) do |ssh|
-          tmpdir = ssh.exec!('/usr/bin/mktemp -d').chomp
-          logoutput = "#{tmpdir}/output.json"
-          ssh.exec!("sudo #{PUPPET} agent --test --noop --logdest #{logoutput} #{additional_options.join(' ')}")
-          ssh.loop
-          output = ssh.exec!("cat #{logoutput}")
-          Thread.current[:json] = JSON.parse(output + ']')
+        begin
+          Net::SSH.start(Thread.current[:host], options.user, ssh_options) do |ssh|
+            tmpdir = ssh.exec!('/usr/bin/mktemp -d').chomp
+            logoutput = "#{tmpdir}/output.json"
+            ssh.exec!("sudo #{PUPPET} agent --test --noop --logdest #{logoutput} #{additional_options.join(' ')}")
+            ssh.loop
+            output = ssh.exec!("cat #{logoutput}")
+            Thread.current[:json] = JSON.parse(output + ']')
+          end
+        rescue StandardError => err
+          puts "#{progress_string(options.bar)} Worker #{Thread.current[:index]}: Error processing #{Thread.current[:host]}: #{err}"
+          next
         end
 
         mutex.synchronize {
