@@ -199,7 +199,7 @@ end
 
           Thread.current[:json] = JSON.parse(output + ']')
 
-        rescue EOFError, StandardError => err
+        rescue JSON::ParserError, EOFError, StandardError => err
           mutex.synchronize {
             puts "#{progress_string(options.bar)} Worker #{Thread.current[:index]}: Error processing #{Thread.current[:host]}: #{err}"
             @progress[:wip] -= 1
