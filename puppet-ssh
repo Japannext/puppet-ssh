@@ -14,6 +14,7 @@ options = OpenStruct.new
 PUPPET = '/opt/puppetlabs/bin/puppet'
 
 options.batch = 10
+options.bar = false
 options.user = ENV['USER']
 additional_options = []
 
@@ -41,6 +42,9 @@ OptionParser.new do |opts|
   end
   opts.on('-s source', '--source source', String, 'A regex to select only certain resources') do |s|
     options.source = s
+  end
+  opts.on('--[no-]bar', TrueClass, 'Show progress with a bar graph instead of exact numbers') do |s|
+    options.bar = s
   end
   opts.on_tail('-h', '--help') do
     puts opts
@@ -91,52 +95,113 @@ aggregates = {}
 
 ssh_options = {verify_host_key: :never, non_interactive: true, check_host_ip: false}
 
-batches = hosts.each_slice(options.batch).to_a
-batches.each.with_index(1) do |batch, index|
-  puts "[Batch #{index}/#{batches.size}] #{batch[0]} to #{batch[-1]}"
-  threads = []
-  batch.each do |host|
-    threads << Thread.new do
-      Net::SSH.start(host, options.user, ssh_options) do |ssh|
-        tmpdir = ssh.exec!('/usr/bin/mktemp -d').chomp
-        logoutput = "#{tmpdir}/output.json"
-        ssh.exec!("sudo #{PUPPET} agent --test --noop --logdest #{logoutput} #{additional_options.join(' ')}")
-        ssh.loop
-        output = ssh.exec!("cat #{logoutput}")
-        json = JSON.parse(output + ']')
-        Thread.current[:host] = host
-        Thread.current[:json] = json
-      end
-    end
-  end
-  threads.each do |t|
-    t.join
-    t[:json].each do |entry|
-      message = tarpit(entry['message'])
+mutex = Mutex.new
 
-      # Option to only include some resources matcching a regex
-      next if options.source && entry['source'] !~ /#{options.source}/
+threads = []
 
-      # Non-enssential and a lot of unique messages that make the output less readable
-      next if entry['source'] == 'Puppet' and ['info', 'notice'].include?(entry['level'])
+@progress = {
+  pending: hosts.size,
+  wip: 0,
+  done: 0,
+}
 
-      # Removing pluginsync messages
-      next if entry['source'] =~ %r{^/File}
+@symbols = {
+  pending: ?-,
+  wip: ?+,
+  done: ?#,
+}
 
-      aggregates[message] ||= {}
-      aggr = aggregates[message]
-      aggr['hosts'] ||= []
-      aggr['hosts'] << t[:host]
-      aggr['hosts'] = aggr['hosts'].uniq
-      aggr.merge!({
-          'level'  => entry['level'],
-          'tags'   => entry['tags'],
-          'source' => entry['source'],
-      })
-    end
+
+def progress_string(bar)
+  if bar then
+    [ :done, :wip, :pending ].reduce("") { |string, state|
+      string << @symbols[state] * @progress[state]
+    }
+  else
+    "[P:%d W:%d D:%d]" % [ @progress[:pending], @progress[:wip], @progress[:done] ]
   end
 end
 
+[ options.batch, hosts.size ].min.times { |thread_counter|
+
+  threads << Thread.new do
+    mutex.synchronize {
+      Thread.current[:index] = thread_counter + 1
+      Thread.current[:done] = 0
+    }
+
+    catch :done do
+
+      loop {
+
+        mutex.synchronize {
+          throw :done if hosts.size == 0
+          Thread.current[:host] = hosts.shift
+          Thread.current[:done] += 1
+          @progress[:pending] -= 1
+          @progress[:wip] += 1
+          puts "#{progress_string(options.bar)} Worker #{Thread.current[:index]}: Processing #{Thread.current[:host]}..."
+        }
+
+        Net::SSH.start(Thread.current[:host], options.user, ssh_options) do |ssh|
+          tmpdir = ssh.exec!('/usr/bin/mktemp -d').chomp
+          logoutput = "#{tmpdir}/output.json"
+          ssh.exec!("sudo #{PUPPET} agent --test --noop --logdest #{logoutput} #{additional_options.join(' ')}")
+          ssh.loop
+          output = ssh.exec!("cat #{logoutput}")
+          Thread.current[:json] = JSON.parse(output + ']')
+        end
+
+        mutex.synchronize {
+          Thread.current[:json].each do |entry|
+            message = tarpit(entry['message'])
+
+            # Option to only include some resources matcching a regex
+            next if options.source && entry['source'] !~ /#{options.source}/
+
+            # Non-enssential and a lot of unique messages that make the output less readable
+            next if entry['source'] == 'Puppet' and ['info', 'notice'].include?(entry['level'])
+
+            # Removing pluginsync messages
+            next if entry['source'] =~ %r{^/File}
+
+            aggregates[message] ||= {}
+            aggr = aggregates[message]
+            aggr['hosts'] ||= []
+            aggr['hosts'] << Thread.current[:host]
+            aggr['hosts'] = aggr['hosts'].uniq
+            aggr.merge!({
+              'level'  => entry['level'],
+              'tags'   => entry['tags'],
+              'source' => entry['source'],
+            })
+          end
+
+          @progress[:wip] -= 1
+          @progress[:done] += 1
+
+        }
+      }
+    end
+
+    Thread.main.wakeup
+
+  end
+
+}
+
+while threads.size > 0 do
+  sleep(60)
+  mutex.synchronize {
+    threads.each_with_index { |t, index|
+      unless t.alive? then
+        puts "#{progress_string(options.bar)} Worker #{t[:index]}: Done after processing #{t[:done]} hosts."
+        t.join
+        threads.delete_at(index)
+      end
+    }
+  }
+end
 OUTFILE.write('')
 $output = OUTFILE.open('a')
 
