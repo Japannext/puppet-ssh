@@ -153,7 +153,9 @@ end
             Thread.current[:json] = JSON.parse(output + ']')
           end
         rescue StandardError => err
-          puts "#{progress_string(options.bar)} Worker #{Thread.current[:index]}: Error processing #{Thread.current[:host]}: #{err}"
+          mutex.synchronize {
+            puts "#{progress_string(options.bar)} Worker #{Thread.current[:index]}: Error processing #{Thread.current[:host]}: #{err}"
+          }
           next
         end
 
