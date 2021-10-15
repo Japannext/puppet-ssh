@@ -103,22 +103,24 @@ threads = []
   pending: hosts.size,
   wip: 0,
   done: 0,
+  failed: 0,
 }
 
 @symbols = {
   pending: ?-,
   wip: ?+,
   done: ?#,
+  failed: ?!,
 }
 
 
 def progress_string(bar)
   if bar then
-    [ :done, :wip, :pending ].reduce("") { |string, state|
+    [ :failed, :done, :wip, :pending ].reduce("") { |string, state|
       string << @symbols[state] * @progress[state]
     }
   else
-    "[P:%d W:%d D:%d]" % [ @progress[:pending], @progress[:wip], @progress[:done] ]
+    "[P:%d W:%d D:%d F:%d]" % [ @progress[:pending], @progress[:wip], @progress[:done], @progress[:failed] ]
   end
 end
 
@@ -155,6 +157,8 @@ end
         rescue StandardError => err
           mutex.synchronize {
             puts "#{progress_string(options.bar)} Worker #{Thread.current[:index]}: Error processing #{Thread.current[:host]}: #{err}"
+            @progress[:wip] -= 1
+            @progress[:failed] += 1
           }
           next
         end
