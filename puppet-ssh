@@ -154,3 +154,5 @@ cases.each_with_index do |(h, entries), index|
   end
   output ''
 end
+
+# vim:sw=2:et:
