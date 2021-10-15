@@ -9,6 +9,7 @@ require 'pathname'
 require 'date'
 require 'open3'
 require 'securerandom'
+require 'io/wait'
 
 options = OpenStruct.new
 
@@ -19,6 +20,7 @@ options.batch = 10
 options.bar = false
 options.user = ENV['USER']
 options.method = :ruby
+options.debug = false
 additional_options = []
 options.ssh_config = true # /etc/ssh/ssh_config + ~/.ssh/config
 
@@ -60,6 +62,9 @@ OptionParser.new do |opts|
   end
   opts.on('--[no-]bar', TrueClass, 'Show progress with a bar graph instead of exact numbers') do |s|
     options.bar = s
+  end
+  opts.on('--[no-]debug', TrueClass, 'Extra debug output on failure') do |s|
+    options.debug = s
   end
   opts.on_tail('-h', '--help') do
     puts opts
@@ -142,7 +147,7 @@ def progress_string(bar)
   end
 end
 
-def pipe_exec(stdin, stdout, command)
+def pipe_exec(stdin, stdout, stderr, debug, command)
   separator = "PUPPET_SSH_END_OF_COMMAND:#{SecureRandom.hex}"
   stdin.puts(command)
   stdin.puts("echo -n #{separator}")
@@ -150,6 +155,7 @@ def pipe_exec(stdin, stdout, command)
   while ! output.end_with?(separator)
     output << stdout.readpartial(1_000_000)
   end
+  debug << stderr.readpartial(1_000_000)
   output.chomp(separator)
 end
 
@@ -176,6 +182,7 @@ end
 
         begin
           output = ""
+          debug = ""
           case options.method
           when :ruby then
             Net::SSH.start(Thread.current[:host], options.user, ssh_options) do |ssh|
@@ -187,11 +194,18 @@ end
             end
           when :ssh then
             Open3.popen3("ssh", "-T", "-l", options.user, Thread.current[:host]) { | stdin, stdout, stderr, thread |
-              tmpdir = pipe_exec(stdin, stdout, '/usr/bin/mktemp -d').chomp
+              if stderr.ready?
+                debug << stderr.readpartial(1_000_000)
+              end
+              pipe_exec(stdin, stdout, stderr, debug, "set -x")
+              tmpdir = pipe_exec(stdin, stdout, stderr, debug, '/usr/bin/mktemp -d').chomp
               logoutput = "#{tmpdir}/output.json"
-              pipe_exec(stdin, stdout, "sudo #{PUPPET} agent --test --noop --logdest #{logoutput} #{additional_options.join(' ')}")
-              output = pipe_exec(stdin, stdout, "cat #{logoutput}")
-              pipe_exec(stdin, stdout, "rm -rf #{tmpdir}")
+              pipe_exec(stdin, stdout, stderr, debug, "sudo #{PUPPET} agent --test --noop --logdest #{logoutput} #{additional_options.join(' ')}")
+              output = pipe_exec(stdin, stdout, stderr, debug, "cat #{logoutput}")
+              pipe_exec(stdin, stdout, stderr, debug, "rm -rf #{tmpdir}")
+              if stderr.ready?
+                debug << stderr.readpartial(1_000_000)
+              end
             }
           else
             raise "Unexpected method [#{options.method}]"
@@ -204,6 +218,9 @@ end
             puts "#{progress_string(options.bar)} Worker #{Thread.current[:index]}: Error processing #{Thread.current[:host]}: #{err}"
             @progress[:wip] -= 1
             @progress[:failed] += 1
+            if options.debug then
+              puts "DEBUG: #{debug}"
+            end
           }
           next
         end
