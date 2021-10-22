@@ -193,7 +193,7 @@ end
               output = ssh.exec!("cat #{logoutput}")
             end
           when :ssh then
-            Open3.popen3("ssh", "-T", "-l", options.user, Thread.current[:host]) { | stdin, stdout, stderr, thread |
+            Open3.popen3("ssh", "-T", "-l", options.user, Thread.current[:host], "/usr/bin/env", "sh") { | stdin, stdout, stderr, thread |
               if stderr.ready?
                 debug << stderr.readpartial(1_000_000)
               end
