@@ -224,7 +224,7 @@ end
 cases = aggregates.group_by { |_, v| v['hosts'] }
 cases = cases.sort_by { |h, _| h.length }.reverse
 cases.each_with_index do |(h, entries), index|
-  output "[Case #{index + 1}/#{cases.size}] #{h.join(' ')}"
+  output "[Case #{index + 1}/#{cases.size}] #{h.join(' ')}".black_on_green
   entries.each do |(message, hash)|
     output format(message, hash)
   end
