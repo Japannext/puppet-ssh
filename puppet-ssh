@@ -103,22 +103,24 @@ threads = []
   pending: hosts.size,
   wip: 0,
   done: 0,
+  failed: 0,
 }
 
 @symbols = {
   pending: ?-,
   wip: ?+,
   done: ?#,
+  failed: ?!,
 }
 
 
 def progress_string(bar)
   if bar then
-    [ :done, :wip, :pending ].reduce("") { |string, state|
+    [ :failed, :done, :wip, :pending ].reduce("") { |string, state|
       string << @symbols[state] * @progress[state]
     }
   else
-    "[P:%d W:%d D:%d]" % [ @progress[:pending], @progress[:wip], @progress[:done] ]
+    "[P:%d W:%d D:%d F:%d]" % [ @progress[:pending], @progress[:wip], @progress[:done], @progress[:failed] ]
   end
 end
 
@@ -143,13 +145,22 @@ end
           puts "#{progress_string(options.bar)} Worker #{Thread.current[:index]}: Processing #{Thread.current[:host]}..."
         }
 
-        Net::SSH.start(Thread.current[:host], options.user, ssh_options) do |ssh|
-          tmpdir = ssh.exec!('/usr/bin/mktemp -d').chomp
-          logoutput = "#{tmpdir}/output.json"
-          ssh.exec!("sudo #{PUPPET} agent --test --noop --logdest #{logoutput} #{additional_options.join(' ')}")
-          ssh.loop
-          output = ssh.exec!("cat #{logoutput}")
-          Thread.current[:json] = JSON.parse(output + ']')
+        begin
+          Net::SSH.start(Thread.current[:host], options.user, ssh_options) do |ssh|
+            tmpdir = ssh.exec!('/usr/bin/mktemp -d').chomp
+            logoutput = "#{tmpdir}/output.json"
+            ssh.exec!("sudo #{PUPPET} agent --test --noop --logdest #{logoutput} #{additional_options.join(' ')}")
+            ssh.loop
+            output = ssh.exec!("cat #{logoutput}")
+            Thread.current[:json] = JSON.parse(output + ']')
+          end
+        rescue StandardError => err
+          mutex.synchronize {
+            puts "#{progress_string(options.bar)} Worker #{Thread.current[:index]}: Error processing #{Thread.current[:host]}: #{err}"
+            @progress[:wip] -= 1
+            @progress[:failed] += 1
+          }
+          next
         end
 
         mutex.synchronize {
