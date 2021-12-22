@@ -17,6 +17,7 @@ options.batch = 10
 options.bar = false
 options.user = ENV['USER']
 additional_options = []
+options.ssh_config = true # /etc/ssh/ssh_config + ~/.ssh/config
 
 hosts = []
 filename = 'default'
@@ -24,6 +25,11 @@ filename = 'default'
 # Options
 OptionParser.new do |opts|
   opts.banner = "Usage: #{$PROGRAM_NAME} [options] HOST..."
+  opts.separator ''
+  opts.separator 'Not all SSH config will be honored by ruby Net::SSH::Config.'
+  opts.separator 'For more details: https://net-ssh.github.io/ssh/v2/api/classes/Net/SSH/Config.html'
+  opts.separator ''
+  opts.separator 'Options:'
   opts.on('-h file', '--hosts file', String, 'A file containing a list of hosts') do |file|
     filename = Pathname(file).basename
     hosts += File.read(file).each_line.map(&:chomp)
@@ -42,6 +48,9 @@ OptionParser.new do |opts|
   end
   opts.on('-s source', '--source source', String, 'A regex to select only certain resources') do |s|
     options.source = s
+  end
+  opts.on('-c config', '--ssh-config config', String, 'A custom SSH config. Default to reading /etc/ssh/ssh_config and ~/.ssh/config') do |config|
+    options.ssh_config = config
   end
   opts.on('--[no-]bar', TrueClass, 'Show progress with a bar graph instead of exact numbers') do |s|
     options.bar = s
@@ -93,7 +102,10 @@ end
 # Main loop
 aggregates = {}
 
-ssh_options = {verify_host_key: :never, non_interactive: true, check_host_ip: false}
+ssh_options = {
+  config: options.ssh_config,
+  non_interactive: true
+}
 
 mutex = Mutex.new
 
